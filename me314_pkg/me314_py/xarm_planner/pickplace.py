@@ -11,9 +11,13 @@ from cv_bridge import CvBridge
 from scipy.spatial.transform import Rotation as R
 import tf2_ros
 from rclpy.duration import Duration
+import time
 
 # Import the command queue message types from the reference code
 from me314_msgs.msg import CommandQueue, CommandWrapper
+
+CAMERA_OFFSET = 0.058
+REAL = True
 
 class PickPlace(Node):
     def __init__(self):
@@ -32,22 +36,32 @@ class PickPlace(Node):
         
         self.bridge = CvBridge()
 
+        if REAL:
+            color_sub = '/camera/realsense2_camera_node/color/image_raw'
+            depth_sub = '/camera/realsense2_camera_node/aligned_depth_to_color/image_raw'
+        else:
+            color_sub = '/color/image_raw'
+            depth_sub = '/aligned_depth_to_color/image_raw'
+
         self.subscription = self.create_subscription(
             Image,
-            '/color/image_raw',
+            color_sub,
             self.camera_listener_callback,
             10)
         self.subscription  # prevent unused variable warning
 
         self.subscription_depth = self.create_subscription(
             Image,
-            '/aligned_depth_to_color/image_raw',
+            depth_sub,
             self.depth_listener_callback,
             10)
         self.subscription_depth  # prevent unused variable warning
 
         # Intrinsics for RGB and Depth cameras
-        self.rgb_K = (640.5098266601562, 640.5098266601562, 640.0, 360.0)
+        if REAL:
+            self.rgb_K = (605.763671875, 606.1971435546875, 324.188720703125, 248.70957946777344)
+        else:
+            self.rgb_K = (640.5098266601562, 640.5098266601562, 640.0, 360.0)
 
         self.red_center_coordinates = None
         self.red_depth = None
@@ -157,7 +171,6 @@ class PickPlace(Node):
                 
                 self.publish_pose(new_pose)
                 self.get_logger().info("Raising camera to look for objects...")
-                
                 # Look for objects
                 # cv_ColorImage = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
                 cv_ColorImage = self.bridge.imgmsg_to_cv2(msg, "rgb8")
@@ -213,10 +226,6 @@ class PickPlace(Node):
         mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
         mask = cv2.bitwise_or(mask1, mask2)
 
-        cv2.imwrite("red_mask1.jpg", mask1)
-        cv2.imwrite("red_mask2.jpg", mask2)
-        cv2.imwrite("red_mask.jpg", mask)
-
         # Find contours
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -236,7 +245,6 @@ class PickPlace(Node):
         # Annotate image
         result = frame.copy()
         cv2.circle(result, (cx, cy), 5, (0, 255, 0), -1)
-        cv2.imwrite("red_annotated.jpg", result)
         return result, (cx, cy)
 
     def mask_green_object(self, frame: np.ndarray):
@@ -287,7 +295,7 @@ class PickPlace(Node):
         u, v = pixel_coords
         X = (u - cx) * depth_m / fx
         Y = (v - cy) * depth_m / fy
-        Z = depth_m
+        Z = depth_m + CAMERA_OFFSET
         return (X, Y, Z)
 
     def camera_to_base_tf(self, camera_coords, frame_name: str):
@@ -364,7 +372,7 @@ def main(args=None):
     # Create pose for red box
     pose_above_red = [world_coords_red[0, 0], world_coords_red[1, 0], world_coords_red[2, 0] + 0.1,
                 1.0, 0.0, 0.0, 0.0]  # Assuming no rotation needed
-    pose_red = [world_coords_red[0, 0], world_coords_red[1, 0], world_coords_red[2, 0] - 0.0127,
+    pose_red = [world_coords_red[0, 0], world_coords_red[1, 0], world_coords_red[2, 0] + 0.01,
                 1.0, 0.0, 0.0, 0.0]  # Assuming no rotation needed
     node.pose_to_box.append(pose_above_red)
     node.pose_to_box.append(pose_red)
@@ -380,11 +388,11 @@ def main(args=None):
     node.publish_gripper_position(1.0)
 
     # Move the arm to the green square
-    pose_above_green = [world_coords_green[0, 0], world_coords_green[1, 0], world_coords_green[2, 0] + 0.1,
+    pose_above_green = [world_coords_green[0, 0], world_coords_green[1, 0] + 0.06, world_coords_green[2, 0] + 0.1,
                   1.0, 0.0, 0.0, 0.0]  # Assuming no rotation needed
     node.pose_to_square.append(pose_above_green)
 
-    pose_green = [world_coords_green[0, 0], world_coords_green[1, 0], world_coords_green[2, 0] + 0.0127,
+    pose_green = [world_coords_green[0, 0], world_coords_green[1, 0] + 0.06, world_coords_green[2, 0] + 0.0127,
                   1.0, 0.0, 0.0, 0.0]  # Assuming no rotation needed
     node.pose_to_square.append(pose_green)
     node.get_logger().info(f"Green square pose: {pose_green}")
