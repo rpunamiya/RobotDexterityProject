@@ -11,9 +11,13 @@ from cv_bridge import CvBridge
 from scipy.spatial.transform import Rotation as R
 import tf2_ros
 from rclpy.duration import Duration
+import time
 
 # Import the command queue message types from the reference code
 from me314_msgs.msg import CommandQueue, CommandWrapper
+
+CAMERA_OFFSET = 0.058
+REAL = True
 
 class PickPlace(Node):
     def __init__(self):
@@ -25,28 +29,39 @@ class PickPlace(Node):
         # Subscribe to current arm pose and gripper position for status tracking (optional)
         self.current_arm_pose = None
         self.pose_status_sub = self.create_subscription(Pose, '/me314_xarm_current_pose', self.arm_pose_callback, 10)
-        
+        self.init_arm_pose = None
+
         self.current_gripper_position = None
         self.gripper_status_sub = self.create_subscription(Float64, '/me314_xarm_gripper_position', self.gripper_position_callback, 10)
         
         self.bridge = CvBridge()
 
+        if REAL:
+            color_sub = '/camera/realsense2_camera_node/color/image_raw'
+            depth_sub = '/camera/realsense2_camera_node/aligned_depth_to_color/image_raw'
+        else:
+            color_sub = '/color/image_raw'
+            depth_sub = '/aligned_depth_to_color/image_raw'
+
         self.subscription = self.create_subscription(
             Image,
-            '/color/image_raw',
+            color_sub,
             self.camera_listener_callback,
             10)
         self.subscription  # prevent unused variable warning
 
         self.subscription_depth = self.create_subscription(
             Image,
-            '/aligned_depth_to_color/image_raw',
+            depth_sub,
             self.depth_listener_callback,
             10)
         self.subscription_depth  # prevent unused variable warning
 
         # Intrinsics for RGB and Depth cameras
-        self.rgb_K = (640.5098266601562, 640.5098266601562, 640.0, 360.0)
+        if REAL:
+            self.rgb_K = (605.763671875, 606.1971435546875, 324.188720703125, 248.70957946777344)
+        else:
+            self.rgb_K = (640.5098266601562, 640.5098266601562, 640.0, 360.0)
 
         self.red_center_coordinates = None
         self.red_depth = None
@@ -58,8 +73,10 @@ class PickPlace(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
         self.found = False
+        self.gotDepth = False
 
         self.pose_to_box = []
+        self.pose_to_square = []
 
     def arm_pose_callback(self, msg: Pose):
         self.current_arm_pose = msg
@@ -135,20 +152,34 @@ class PickPlace(Node):
         # 4) if both are not found, raise camera return empty
         
         if self.red_center_coordinates is None or self.green_center_coordinates is None :
-            self.get_logger().info("OBJECTS NOT DETECTED")
             if self.current_arm_pose is not None:
                 # Raise the camera
-                self.publish_pose(self.current_arm_pose + [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
-                self.get_logger().info("Raising camera to look for objects...")
+                pose = self.current_arm_pose
+                if self.init_arm_pose is None:
+                    self.init_arm_pose = pose
+
+                # Extract position and orientation as a list and apply z-offset
+                new_pose = [
+                    pose.position.x,
+                    pose.position.y,
+                    pose.position.z + 0.1,  # Add 1.0 offset to Z
+                    pose.orientation.x,
+                    pose.orientation.y,
+                    pose.orientation.z,
+                    pose.orientation.w
+                ]
                 
+                self.publish_pose(new_pose)
+                self.get_logger().info("Raising camera to look for objects...")
                 # Look for objects
-                cv_ColorImage = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-                cv_ColorImage_rgb = cv2.cvtColor(cv_ColorImage, cv2.COLOR_BGR2RGB)
+                # cv_ColorImage = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+                cv_ColorImage = self.bridge.imgmsg_to_cv2(msg, "rgb8")
+                # cv_ColorImage_rgb = cv2.cvtColor(cv_ColorImage, cv2.COLOR_BGR2RGB)
 
                 # Mask for red and green objects
-                masked_image_red, red_center = self.mask_red_object(cv_ColorImage_rgb)
-                masked_image_green, green_center = self.mask_green_object(cv_ColorImage_rgb)
-
+                masked_image_red, red_center = self.mask_red_object(cv_ColorImage)
+                masked_image_green, green_center = self.mask_green_object(cv_ColorImage)
+                
                 if red_center != (None, None):
                     self.get_logger().info(f"Found red object at: {red_center}")
                     self.red_center_coordinates = red_center
@@ -185,10 +216,9 @@ class PickPlace(Node):
         """
         hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
 
-        # Define HSV range for red color (two ranges because red wraps around hue=0)
-        lower_red1 = np.array([0, 100, 100])
+        lower_red1 = np.array([0, 100, 90])
         upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([160, 100, 100])
+        lower_red2 = np.array([160, 70, 50])
         upper_red2 = np.array([180, 255, 255])
 
         # Create masks and combine
@@ -214,9 +244,43 @@ class PickPlace(Node):
 
         # Annotate image
         result = frame.copy()
-        cv2.drawContours(result, [largest_contour], -1, (255, 0, 0), 2)
         cv2.circle(result, (cx, cy), 5, (0, 255, 0), -1)
+        return result, (cx, cy)
 
+    def mask_green_object(self, frame: np.ndarray):
+        """
+        Detect the green object in the frame using HSV masking.
+        Returns the annotated image and the (x, y) center of the largest green contour.
+        """
+        hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+
+        # Define HSV range for green color
+        lower_green = np.array([40, 100, 100])
+        upper_green = np.array([80, 255, 255])
+
+        # Create mask
+        mask = cv2.inRange(hsv, lower_green, upper_green)
+
+        # Find contours
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            return frame, (None, None)
+
+        # Get the largest contour by area
+        largest_contour = max(contours, key=cv2.contourArea)
+        M = cv2.moments(largest_contour)
+        if M["m00"] == 0:
+            return frame, (None, None)
+
+        # Calculate center
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+
+        # Annotate image
+        result = frame.copy()
+        # cv2.drawContours(result, [largest_contour], -1, (0, 255, 0), 2)  # Green contour
+        cv2.circle(result, (cx, cy), 5, (0, 0, 255), -1)  # Green center dot
         return result, (cx, cy)
 
 
@@ -231,7 +295,7 @@ class PickPlace(Node):
         u, v = pixel_coords
         X = (u - cx) * depth_m / fx
         Y = (v - cy) * depth_m / fy
-        Z = depth_m
+        Z = depth_m + CAMERA_OFFSET
         return (X, Y, Z)
 
     def camera_to_base_tf(self, camera_coords, frame_name: str):
@@ -284,10 +348,12 @@ def main(args=None):
     rclpy.init(args=args)
     node = PickPlace()
 
-    while not node.found:
+    while not node.found or not node.gotDepth:
         rclpy.spin_once(node)
         if node.red_center_coordinates is not None and node.green_center_coordinates is not None:
             node.found = True
+        if node.red_depth is not None and node.green_depth is not None:
+            node.gotDepth = True
 
     # Let's first open the gripper (0.0 to 1.0, where 0.0 is fully open and 1.0 is fully closed)
     node.get_logger().info("Opening gripper...")
@@ -296,14 +362,19 @@ def main(args=None):
     # Convert pixel coords + depth to camera coordinates
     # camera_coords = self.pixel_to_camera_frame(self.center_coordinates, depth_at_center_m)
     camera_coords_red = node.pixel_to_camera_frame(node.red_center_coordinates, node.red_depth/1000.0)
-    camera_coords_green = node.pixel_to_camera_frame(node.red_center_coordinates, node.red_depth/1000.0)
+    camera_coords_green = node.pixel_to_camera_frame(node.green_center_coordinates, node.green_depth/1000.0)
     # Transform camera coords to the robot arm frame
     world_coords_red = node.camera_to_base_tf(camera_coords_red, 'camera_color_optical_frame')
     world_coords_green = node.camera_to_base_tf(camera_coords_green, 'camera_color_optical_frame')
+    node.get_logger().info(f"Red world coords: {world_coords_red}")
+    node.get_logger().info(f"Green world coords: {world_coords_green}")
 
     # Create pose for red box
-    pose_red = [world_coords_red[0, 0], world_coords_red[1, 0], world_coords_red[2, 0],
+    pose_above_red = [world_coords_red[0, 0], world_coords_red[1, 0], world_coords_red[2, 0] + 0.1,
                 1.0, 0.0, 0.0, 0.0]  # Assuming no rotation needed
+    pose_red = [world_coords_red[0, 0], world_coords_red[1, 0], world_coords_red[2, 0] + 0.01,
+                1.0, 0.0, 0.0, 0.0]  # Assuming no rotation needed
+    node.pose_to_box.append(pose_above_red)
     node.pose_to_box.append(pose_red)
     node.get_logger().info(f"Red box pose: {pose_red}")
 
@@ -317,14 +388,35 @@ def main(args=None):
     node.publish_gripper_position(1.0)
 
     # Move the arm to the green square
-    node.get_logger().info("Moving to green square...")
-    pose_green = [world_coords_green[0, 0], world_coords_green[1, 0], world_coords_green[2, 0],
+    pose_above_green = [world_coords_green[0, 0], world_coords_green[1, 0] + 0.06, world_coords_green[2, 0] + 0.1,
                   1.0, 0.0, 0.0, 0.0]  # Assuming no rotation needed
-    node.publish_pose(pose_green)
+    node.pose_to_square.append(pose_above_green)
+
+    pose_green = [world_coords_green[0, 0], world_coords_green[1, 0] + 0.06, world_coords_green[2, 0] + 0.0127,
+                  1.0, 0.0, 0.0, 0.0]  # Assuming no rotation needed
+    node.pose_to_square.append(pose_green)
     node.get_logger().info(f"Green square pose: {pose_green}")
+
+    node.get_logger().info("Moving to green square...")
+    for i, pose in enumerate(node.pose_to_square):
+        node.get_logger().info(f"Publishing Pose {i+1}...")
+        node.publish_pose(pose)
 
     node.get_logger().info("Opening gripper...")
     node.publish_gripper_position(0.0)
+
+    node.get_logger().info("Moving back to initial position...")
+    node.publish_pose(pose_above_green)
+    init_pose = [
+                    node.init_arm_pose.position.x,
+                    node.init_arm_pose.position.y,
+                    node.init_arm_pose.position.z,
+                    node.init_arm_pose.orientation.x,
+                    node.init_arm_pose.orientation.y,
+                    node.init_arm_pose.orientation.z,
+                    node.init_arm_pose.orientation.w
+                ]
+    node.publish_pose(init_pose)
 
     node.get_logger().info("All actions done. Shutting down.")
 
