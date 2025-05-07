@@ -370,7 +370,7 @@ def main(args=None):
     # Create pose for red box
     pose_above_red = [world_coords_red[0, 0], world_coords_red[1, 0], world_coords_red[2, 0] + 0.1,
                 1.0, 0.0, 0.0, 0.0]  # Assuming no rotation needed
-    pose_red = [world_coords_red[0, 0], world_coords_red[1, 0], world_coords_red[2, 0] + 0.01,
+    pose_red = [world_coords_red[0, 0], world_coords_red[1, 0], world_coords_red[2, 0] - 0.01,
                 1.0, 0.0, 0.0, 0.0]  # Assuming no rotation needed
     node.pose_to_box.append(pose_above_red)
     node.pose_to_box.append(pose_red)

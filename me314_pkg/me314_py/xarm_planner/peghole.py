@@ -19,6 +19,7 @@ import math
 import pandas as pd
 import matplotlib.pyplot as plt
 
+REAL = True  # Set to True if using a real robot, False for simulation
 
 class Peghole(Node):
     def __init__(self):

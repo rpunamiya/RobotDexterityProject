@@ -36,7 +36,8 @@ install(PROGRAMS
   me314_py/xarm_planner/xarm_a2b_example.py
   me314_py/xarm_planner/xarm_commander.py
   me314_py/xarm_planner/pickplace.py
-  me314_py/xarm_planner/ft_sensing.py
+  me314_py/xarm_planner/peghole.py
+  me314_py/xarm_planner/ft_monitor.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
